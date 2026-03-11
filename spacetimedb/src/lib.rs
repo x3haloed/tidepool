@@ -37,6 +37,32 @@ pub struct DmLookup {
     participant_account_ids: Vec<u64>,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, spacetimedb::SpacetimeType)]
+pub struct AccountLookup {
+    account_id: u64,
+    handle: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, spacetimedb::SpacetimeType)]
+pub struct SubscriptionLookup {
+    domain_id: u64,
+    slug: String,
+    title: String,
+    message_char_limit: u16,
+    batch_window_seconds: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, spacetimedb::SpacetimeType)]
+pub struct SubscribedMessageLookup {
+    message_id: u64,
+    domain_id: u64,
+    domain_sequence: u64,
+    author_account_id: u64,
+    body: String,
+    created_at: Timestamp,
+    reply_to_message_id: Option<u64>,
+}
+
 #[spacetimedb::table(
     accessor = account,
     public,
@@ -189,6 +215,75 @@ pub fn my_dm_domains(ctx: &ViewContext) -> Vec<DmLookup> {
             })
         })
         .collect()
+}
+
+#[spacetimedb::view(accessor = my_account, public)]
+pub fn my_account(ctx: &ViewContext) -> Vec<AccountLookup> {
+    active_account_for_view_identity(ctx, ctx.sender())
+        .map(|account| {
+            vec![AccountLookup {
+                account_id: account.account_id,
+                handle: account.handle,
+            }]
+        })
+        .unwrap_or_default()
+}
+
+#[spacetimedb::view(accessor = my_subscriptions, public)]
+pub fn my_subscriptions(ctx: &ViewContext) -> Vec<SubscriptionLookup> {
+    let Some(sender_account_id) = active_account_id_for_view_identity(ctx, ctx.sender()) else {
+        return vec![];
+    };
+
+    ctx.db
+        .subscription()
+        .subscriptions_by_subscriber_account_id()
+        .filter(sender_account_id)
+        .filter(|subscription| subscription.active)
+        .filter_map(|subscription| {
+            let domain = ctx.db.domain().domain_id().find(subscription.domain_id)?;
+            if !can_read_domain_for_view(ctx, &domain, sender_account_id) {
+                return None;
+            }
+
+            Some(SubscriptionLookup {
+                domain_id: domain.domain_id,
+                slug: domain.slug,
+                title: domain.title,
+                message_char_limit: domain.message_char_limit,
+                batch_window_seconds: subscription.batch_window_seconds,
+            })
+        })
+        .collect()
+}
+
+#[spacetimedb::view(accessor = my_subscribed_messages, public)]
+pub fn my_subscribed_messages(ctx: &ViewContext) -> Vec<SubscribedMessageLookup> {
+    let Some(sender_account_id) = active_account_id_for_view_identity(ctx, ctx.sender()) else {
+        return vec![];
+    };
+
+    let mut rows = Vec::new();
+    for domain_id in active_subscription_domain_ids_for_view(ctx, sender_account_id) {
+        rows.extend(
+            ctx.db
+                .message()
+                .messages_by_domain_id()
+                .filter(domain_id)
+                .map(|message| SubscribedMessageLookup {
+                    message_id: message.message_id,
+                    domain_id: message.domain_id,
+                    domain_sequence: message.domain_sequence,
+                    author_account_id: message.author_account_id,
+                    body: message.body,
+                    created_at: message.created_at,
+                    reply_to_message_id: message.reply_to_message_id,
+                }),
+        );
+    }
+
+    rows.sort_by_key(|row| (row.domain_id, row.domain_sequence));
+    rows
 }
 
 #[spacetimedb::reducer]
@@ -517,6 +612,10 @@ fn require_active_sender_account(ctx: &ReducerContext) -> Result<Account, String
 }
 
 fn active_account_id_for_view_identity(ctx: &ViewContext, identity: Identity) -> Option<u64> {
+    Some(active_account_for_view_identity(ctx, identity)?.account_id)
+}
+
+fn active_account_for_view_identity(ctx: &ViewContext, identity: Identity) -> Option<Account> {
     let key = ctx.db.account_key().key_identity().find(identity)?;
     if key.revoked_at.is_some() {
         return None;
@@ -527,7 +626,7 @@ fn active_account_id_for_view_identity(ctx: &ViewContext, identity: Identity) ->
         return None;
     }
 
-    Some(account.account_id)
+    Some(account)
 }
 
 fn ensure_named_domain_claim_allowed(ctx: &ReducerContext, account_id: u64) -> Result<(), String> {
@@ -619,6 +718,11 @@ fn can_read_domain(ctx: &ReducerContext, domain: &Domain, account_id: u64) -> bo
         || has_domain_membership(ctx, domain.domain_id, account_id)
 }
 
+fn can_read_domain_for_view(ctx: &ViewContext, domain: &Domain, account_id: u64) -> bool {
+    matches!(domain.kind, DomainKind::Public)
+        || has_domain_membership_for_view(ctx, domain.domain_id, account_id)
+}
+
 fn can_post_in_domain(ctx: &ReducerContext, domain: &Domain, account_id: u64) -> bool {
     match domain.kind {
         DomainKind::Public => true,
@@ -630,6 +734,14 @@ fn can_post_in_domain(ctx: &ReducerContext, domain: &Domain, account_id: u64) ->
 
 fn has_domain_membership(ctx: &ReducerContext, domain_id: u64, account_id: u64) -> bool {
     find_domain_membership(ctx, domain_id, account_id).is_some()
+}
+
+fn has_domain_membership_for_view(ctx: &ViewContext, domain_id: u64, account_id: u64) -> bool {
+    ctx.db
+        .domain_member()
+        .domain_members_by_domain_id()
+        .filter(domain_id)
+        .any(|membership| membership.account_id == account_id)
 }
 
 fn find_domain_membership(
@@ -766,6 +878,24 @@ fn dm_member_account_ids_for_view(ctx: &ViewContext, domain_id: u64) -> Vec<u64>
         .collect();
     member_account_ids.sort_unstable();
     member_account_ids
+}
+
+fn active_subscription_domain_ids_for_view(ctx: &ViewContext, account_id: u64) -> Vec<u64> {
+    let mut domain_ids: Vec<u64> = ctx
+        .db
+        .subscription()
+        .subscriptions_by_subscriber_account_id()
+        .filter(account_id)
+        .filter(|subscription| subscription.active)
+        .filter_map(|subscription| {
+            let domain = ctx.db.domain().domain_id().find(subscription.domain_id)?;
+            can_read_domain_for_view(ctx, &domain, account_id).then_some(domain.domain_id)
+        })
+        .collect();
+
+    domain_ids.sort_unstable();
+    domain_ids.dedup();
+    domain_ids
 }
 
 fn normalize_message_char_limit(limit: u16) -> Result<u16, String> {
