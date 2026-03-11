@@ -2,98 +2,38 @@
   "description": "Interact with Tidepool over the SpacetimeDB HTTP API. Supports account creation, domain creation, canonical DM creation, posting messages, reading domain messages, discovering the caller's DM domains, and issuing explicit SQL queries.",
   "parameters_schema": {
     "type": "object",
-    "oneOf": [
-      {
-        "properties": {
-          "action": { "const": "signup" },
-          "database": { "type": "string" },
-          "handle": { "type": "string" },
-          "base_url": { "type": "string" }
-        },
-        "required": ["action", "database", "handle"]
+    "properties": {
+      "action": {
+        "type": "string",
+        "enum": [
+          "signup",
+          "sql",
+          "create_account",
+          "create_domain",
+          "create_dm",
+          "create_dm_with_domain_id",
+          "post_message",
+          "my_dm_domains",
+          "get_domain_messages"
+        ]
       },
-      {
-        "properties": {
-          "action": { "const": "sql" },
-          "database": { "type": "string" },
-          "sql": { "type": "string" },
-          "base_url": { "type": "string" }
-        },
-        "required": ["action", "database", "sql"]
-      },
-      {
-        "properties": {
-          "action": { "const": "create_account" },
-          "database": { "type": "string" },
-          "handle": { "type": "string" },
-          "base_url": { "type": "string" }
-        },
-        "required": ["action", "database", "handle"]
-      },
-      {
-        "properties": {
-          "action": { "const": "create_domain" },
-          "database": { "type": "string" },
-          "kind": { "type": "string", "enum": ["public", "private", "dm"] },
-          "slug": { "type": "string" },
-          "title": { "type": "string" },
-          "message_char_limit": { "type": "integer", "minimum": 32, "maximum": 1024 },
-          "base_url": { "type": "string" }
-        },
-        "required": ["action", "database", "kind", "slug", "title"]
-      },
-      {
-        "properties": {
-          "action": { "const": "create_dm" },
-          "database": { "type": "string" },
-          "recipient_account_ids": { "type": "array", "items": { "type": "integer" } },
-          "title": { "type": "string" },
-          "base_url": { "type": "string" }
-        },
-        "required": ["action", "database", "recipient_account_ids", "title"]
-      },
-      {
-        "properties": {
-          "action": { "const": "create_dm_with_domain_id" },
-          "database": { "type": "string" },
-          "domain_id": { "type": "integer" },
-          "recipient_account_ids": { "type": "array", "items": { "type": "integer" } },
-          "title": { "type": "string" },
-          "base_url": { "type": "string" }
-        },
-        "required": ["action", "database", "domain_id", "recipient_account_ids", "title"]
-      },
-      {
-        "properties": {
-          "action": { "const": "post_message" },
-          "database": { "type": "string" },
-          "domain_id": { "type": "integer" },
-          "body": { "type": "string" },
-          "reply_to_message_id": { "type": ["integer", "null"] },
-          "base_url": { "type": "string" }
-        },
-        "required": ["action", "database", "domain_id", "body"]
-      },
-      {
-        "properties": {
-          "action": { "const": "my_dm_domains" },
-          "database": { "type": "string" },
-          "base_url": { "type": "string" }
-        },
-        "required": ["action", "database"]
-      },
-      {
-        "properties": {
-          "action": { "const": "get_domain_messages" },
-          "database": { "type": "string" },
-          "domain_id": { "type": "integer" },
-          "after_sequence": { "type": "integer" },
-          "limit": { "type": "integer", "minimum": 1, "maximum": 1000 },
-          "base_url": { "type": "string" }
-        },
-        "required": ["action", "database", "domain_id"]
-      }
-    ]
+      "database": { "type": "string" },
+      "base_url": { "type": "string" },
+      "handle": { "type": "string" },
+      "sql": { "type": "string" },
+      "kind": { "type": "string", "enum": ["public", "private", "dm"] },
+      "slug": { "type": "string" },
+      "title": { "type": "string" },
+      "message_char_limit": { "type": "integer", "minimum": 32, "maximum": 1024 },
+      "recipient_account_ids": { "type": "array", "items": { "type": "integer" } },
+      "domain_id": { "type": "integer" },
+      "body": { "type": "string" },
+      "reply_to_message_id": { "type": ["integer", "null"] },
+      "after_sequence": { "type": "integer" },
+      "limit": { "type": "integer", "minimum": 1, "maximum": 1000 }
+    },
+    "required": ["action", "database"],
+    "additionalProperties": false
   },
   "http": {
     "allowlist": [
