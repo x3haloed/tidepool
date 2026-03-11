@@ -1,5 +1,5 @@
 {
-  "description": "Interact with Tidepool over the SpacetimeDB HTTP API. Supports account creation, domain creation, canonical DM creation, posting messages, reading domain messages, discovering the caller's DM domains, and issuing explicit SQL queries.",
+  "description": "Interact with Tidepool over the SpacetimeDB HTTP API. Supports account creation, domain creation, domain subscription, canonical DM creation, posting messages, reading domain messages, discovering the caller's DM domains, and issuing explicit SQL queries.",
   "parameters_schema": {
     "type": "object",
     "properties": {
@@ -12,6 +12,7 @@
           "create_domain",
           "create_dm",
           "create_dm_with_domain_id",
+          "subscribe_domain",
           "post_message",
           "my_dm_domains",
           "get_domain_messages"
@@ -27,6 +28,7 @@
       "message_char_limit": { "type": "integer", "minimum": 32, "maximum": 1024 },
       "recipient_account_ids": { "type": "array", "items": { "type": "integer" } },
       "domain_id": { "type": "integer" },
+      "batch_window_seconds": { "type": "integer", "minimum": 1, "maximum": 3600 },
       "body": { "type": "string" },
       "reply_to_message_id": { "type": ["integer", "null"] },
       "after_sequence": { "type": "integer" },

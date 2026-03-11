@@ -51,6 +51,12 @@ enum TidepoolAction {
         title: String,
         base_url: Option<String>,
     },
+    SubscribeDomain {
+        database: String,
+        domain_id: u64,
+        batch_window_seconds: Option<u32>,
+        base_url: Option<String>,
+    },
     PostMessage {
         database: String,
         domain_id: u64,
@@ -97,7 +103,7 @@ impl exports::near::agent::tool::Guest for TidepoolTool {
     }
 
     fn description() -> String {
-        "Interact with Tidepool over the SpacetimeDB HTTP API. Supports account creation, domain creation, canonical DM creation, posting messages, reading domain messages, discovering the caller's DM domains, and issuing explicit SQL queries."
+        "Interact with Tidepool over the SpacetimeDB HTTP API. Supports account creation, domain creation, domain subscription, canonical DM creation, posting messages, reading domain messages, discovering the caller's DM domains, and issuing explicit SQL queries."
             .to_string()
     }
 }
@@ -214,6 +220,28 @@ fn execute_inner(params: &str) -> Result<String, String> {
                 ok: true,
                 action: "create_dm_with_domain_id",
                 data: json!({"database": database, "domain_id": domain_id}),
+            }
+        }
+        TidepoolAction::SubscribeDomain {
+            database,
+            domain_id,
+            batch_window_seconds,
+            base_url,
+        } => {
+            call_reducer(
+                resolve_base_url(base_url)?,
+                &database,
+                "subscribe_domain",
+                json!([domain_id, batch_window_seconds.unwrap_or(30)]),
+            )?;
+            ToolOutput {
+                ok: true,
+                action: "subscribe_domain",
+                data: json!({
+                    "database": database,
+                    "domain_id": domain_id,
+                    "batch_window_seconds": batch_window_seconds.unwrap_or(30)
+                }),
             }
         }
         TidepoolAction::PostMessage {
@@ -452,98 +480,40 @@ fn validate_input_length(value: &str, field_name: &str) -> Result<(), String> {
 
 const SCHEMA: &str = r#"{
   "type": "object",
-  "oneOf": [
-    {
-      "properties": {
-        "action": { "const": "signup" },
-        "database": { "type": "string" },
-        "handle": { "type": "string" },
-        "base_url": { "type": "string" }
-      },
-      "required": ["action", "database", "handle"]
+  "properties": {
+    "action": {
+      "type": "string",
+      "enum": [
+        "signup",
+        "sql",
+        "create_account",
+        "create_domain",
+        "create_dm",
+        "create_dm_with_domain_id",
+        "subscribe_domain",
+        "post_message",
+        "my_dm_domains",
+        "get_domain_messages"
+      ]
     },
-    {
-      "properties": {
-        "action": { "const": "sql" },
-        "database": { "type": "string" },
-        "sql": { "type": "string" },
-        "base_url": { "type": "string" }
-      },
-      "required": ["action", "database", "sql"]
-    },
-    {
-      "properties": {
-        "action": { "const": "create_account" },
-        "database": { "type": "string" },
-        "handle": { "type": "string" },
-        "base_url": { "type": "string" }
-      },
-      "required": ["action", "database", "handle"]
-    },
-    {
-      "properties": {
-        "action": { "const": "create_domain" },
-        "database": { "type": "string" },
-        "kind": { "type": "string", "enum": ["public", "private", "dm"] },
-        "slug": { "type": "string" },
-        "title": { "type": "string" },
-        "message_char_limit": { "type": "integer", "minimum": 32, "maximum": 1024 },
-        "base_url": { "type": "string" }
-      },
-      "required": ["action", "database", "kind", "slug", "title"]
-    },
-    {
-      "properties": {
-        "action": { "const": "create_dm" },
-        "database": { "type": "string" },
-        "recipient_account_ids": { "type": "array", "items": { "type": "integer" } },
-        "title": { "type": "string" },
-        "base_url": { "type": "string" }
-      },
-      "required": ["action", "database", "recipient_account_ids", "title"]
-    },
-    {
-      "properties": {
-        "action": { "const": "create_dm_with_domain_id" },
-        "database": { "type": "string" },
-        "domain_id": { "type": "integer" },
-        "recipient_account_ids": { "type": "array", "items": { "type": "integer" } },
-        "title": { "type": "string" },
-        "base_url": { "type": "string" }
-      },
-      "required": ["action", "database", "domain_id", "recipient_account_ids", "title"]
-    },
-    {
-      "properties": {
-        "action": { "const": "post_message" },
-        "database": { "type": "string" },
-        "domain_id": { "type": "integer" },
-        "body": { "type": "string" },
-        "reply_to_message_id": { "type": ["integer", "null"] },
-        "base_url": { "type": "string" }
-      },
-      "required": ["action", "database", "domain_id", "body"]
-    },
-    {
-      "properties": {
-        "action": { "const": "my_dm_domains" },
-        "database": { "type": "string" },
-        "base_url": { "type": "string" }
-      },
-      "required": ["action", "database"]
-    },
-    {
-      "properties": {
-        "action": { "const": "get_domain_messages" },
-        "database": { "type": "string" },
-        "domain_id": { "type": "integer" },
-        "after_sequence": { "type": "integer" },
-        "limit": { "type": "integer", "minimum": 1, "maximum": 100 },
-        "base_url": { "type": "string" }
-      },
-      "required": ["action", "database", "domain_id"]
-    }
-  ]
+    "database": { "type": "string" },
+    "base_url": { "type": "string" },
+    "handle": { "type": "string" },
+    "sql": { "type": "string" },
+    "kind": { "type": "string", "enum": ["public", "private", "dm"] },
+    "slug": { "type": "string" },
+    "title": { "type": "string" },
+    "message_char_limit": { "type": "integer", "minimum": 32, "maximum": 1024 },
+    "recipient_account_ids": { "type": "array", "items": { "type": "integer" } },
+    "domain_id": { "type": "integer" },
+    "batch_window_seconds": { "type": "integer", "minimum": 1, "maximum": 3600 },
+    "body": { "type": "string" },
+    "reply_to_message_id": { "type": ["integer", "null"] },
+    "after_sequence": { "type": "integer" },
+    "limit": { "type": "integer", "minimum": 1, "maximum": 100 }
+  },
+  "required": ["action", "database"],
+  "additionalProperties": false
 }"#;
 
 export!(TidepoolTool);
