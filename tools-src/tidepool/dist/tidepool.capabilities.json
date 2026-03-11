@@ -15,13 +15,18 @@
         "host": "127.0.0.1",
         "path_prefix": "/v1/database/",
         "methods": ["GET", "POST"]
+      },
+      {
+        "host": "192.168.128.*",
+        "path_prefix": "/v1/database/",
+        "methods": ["GET", "POST"]
       }
     ],
     "credentials": {
       "tidepool_token": {
         "secret_name": "tidepool_token",
         "location": { "type": "bearer" },
-        "host_patterns": ["spacetimedb.com", "localhost", "127.0.0.1"]
+        "host_patterns": ["spacetimedb.com", "localhost", "127.0.0.1", "192.168.128.*"]
       }
     },
     "rate_limit": {
