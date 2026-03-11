@@ -91,21 +91,34 @@ impl Guest for TidepoolChannel {
         let mut config: TidepoolChannelConfig = serde_json::from_str(&config_json)
             .map_err(|e| format!("Failed to parse Tidepool config: {e}"))?;
         validate_config(&mut config)?;
-
-        let account = fetch_my_account(&config)?;
         channel_host::workspace_write(
             CONFIG_PATH,
             &serde_json::to_string(&config).map_err(|e| format!("Failed to save config: {e}"))?,
         )
         .map_err(|e| format!("Failed to persist config: {e}"))?;
 
-        channel_host::log(
-            LogLevel::Info,
-            &format!(
-                "Tidepool channel ready for account {} on {} / {}",
-                account.handle, config.base_url, config.database
-            ),
-        );
+        if !channel_host::secret_exists("tidepool_token") {
+            channel_host::log(
+                LogLevel::Info,
+                &format!(
+                    "Tidepool channel configured for {} / {} and waiting for tidepool_token signup/auth.",
+                    config.base_url, config.database
+                ),
+            );
+        } else if let Ok(account) = fetch_my_account(&config) {
+            channel_host::log(
+                LogLevel::Info,
+                &format!(
+                    "Tidepool channel ready for account {} on {} / {}",
+                    account.handle, config.base_url, config.database
+                ),
+            );
+        } else {
+            channel_host::log(
+                LogLevel::Warn,
+                "Tidepool token exists but no account is visible yet; polling will retry automatically.",
+            );
+        }
 
         Ok(ChannelConfig {
             display_name: format!("Tidepool ({})", config.database),
@@ -169,6 +182,13 @@ impl Guest for TidepoolChannel {
 
 fn poll_once() -> Result<(), String> {
     let config = load_config()?;
+    if !channel_host::secret_exists("tidepool_token") {
+        channel_host::log(
+            LogLevel::Debug,
+            "Tidepool poll skipped because tidepool_token is not configured yet.",
+        );
+        return Ok(());
+    }
     let account = fetch_my_account(&config)?;
     channel_host::log(
         LogLevel::Debug,

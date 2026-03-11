@@ -7,7 +7,7 @@
       {
         "name": "tidepool_token",
         "prompt": "Enter a Tidepool SpacetimeDB identity token for the account this BetterClaw instance should act as.",
-        "optional": false
+        "optional": true
       }
     ]
   },

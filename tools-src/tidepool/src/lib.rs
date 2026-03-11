@@ -4,7 +4,7 @@ wit_bindgen::generate!({
 });
 
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::{json, Value};
 
 const DEFAULT_BASE_URL: &str = "https://spacetimedb.com";
 const DEFAULT_MESSAGE_LIMIT: u32 = 100;
@@ -15,6 +15,11 @@ struct TidepoolTool;
 #[derive(Debug, Deserialize)]
 #[serde(tag = "action", rename_all = "snake_case")]
 enum TidepoolAction {
+    Signup {
+        database: String,
+        handle: String,
+        base_url: Option<String>,
+    },
     Sql {
         database: String,
         sql: String,
@@ -112,6 +117,30 @@ fn execute_inner(params: &str) -> Result<String, String> {
             action: "sql",
             data: sql_query(resolve_base_url(base_url)?, &database, &sql)?,
         },
+        TidepoolAction::Signup {
+            database,
+            handle,
+            base_url,
+        } => {
+            let response = call_reducer_response(
+                resolve_base_url(base_url)?,
+                &database,
+                "create_account",
+                json!([handle]),
+            )?;
+            let token = response_header(&response, "spacetime-identity-token")
+                .ok_or_else(|| "Signup succeeded but no spacetime-identity-token header was returned".to_string())?;
+            ToolOutput {
+                ok: true,
+                action: "signup",
+                data: json!({
+                    "database": database,
+                    "token": token,
+                    "secret_name": "tidepool_token",
+                    "next_step": "Store this token with BetterClaw's secret_set tool under tidepool_token."
+                }),
+            }
+        }
         TidepoolAction::CreateAccount {
             database,
             handle,
@@ -274,8 +303,7 @@ fn call_reducer(
     reducer: &str,
     args: serde_json::Value,
 ) -> Result<(), String> {
-    let url = format!("{}/v1/database/{}/call/{}", base_url, database, reducer);
-    let response = http_post_json(&url, &args)?;
+    let response = call_reducer_response(base_url, database, reducer, args)?;
     if !(200..300).contains(&response.status) {
         return Err(format!(
             "Reducer call failed with status {}: {}",
@@ -286,8 +314,42 @@ fn call_reducer(
     Ok(())
 }
 
-fn http_post_json(url: &str, body: &serde_json::Value) -> Result<near::agent::host::HttpResponse, String> {
-    let body_bytes = serde_json::to_vec(body).map_err(|e| format!("Failed to encode JSON body: {e}"))?;
+fn call_reducer_response(
+    base_url: String,
+    database: &str,
+    reducer: &str,
+    args: serde_json::Value,
+) -> Result<near::agent::host::HttpResponse, String> {
+    let url = format!("{}/v1/database/{}/call/{}", base_url, database, reducer);
+    let response = http_post_json(&url, &args)?;
+    if !(200..300).contains(&response.status) {
+        return Err(format!(
+            "Reducer call failed with status {}: {}",
+            response.status,
+            String::from_utf8_lossy(&response.body)
+        ));
+    }
+    Ok(response)
+}
+
+fn response_header(response: &near::agent::host::HttpResponse, name: &str) -> Option<String> {
+    let headers: serde_json::Value = serde_json::from_str(&response.headers_json).ok()?;
+    let object = headers.as_object()?;
+    object.iter().find_map(|(key, value)| {
+        if key.eq_ignore_ascii_case(name) {
+            value.as_str().map(ToString::to_string)
+        } else {
+            None
+        }
+    })
+}
+
+fn http_post_json(
+    url: &str,
+    body: &serde_json::Value,
+) -> Result<near::agent::host::HttpResponse, String> {
+    let body_bytes =
+        serde_json::to_vec(body).map_err(|e| format!("Failed to encode JSON body: {e}"))?;
     http_post_bytes(url, &body_bytes, "{\"content-type\":\"application/json\"}")
 }
 
@@ -309,14 +371,10 @@ fn http_post_bytes(
     body: &[u8],
     headers_json: &str,
 ) -> Result<near::agent::host::HttpResponse, String> {
-    Ok(near::agent::host::http_request(
-        "POST",
-        url,
-        headers_json,
-        Some(body),
-        None,
+    Ok(
+        near::agent::host::http_request("POST", url, headers_json, Some(body), None)
+            .map_err(|e| format!("HTTP request failed: {e}"))?,
     )
-    .map_err(|e| format!("HTTP request failed: {e}"))?)
 }
 
 fn filter_message_rows(
@@ -342,11 +400,7 @@ fn filter_message_rows(
         .filter(|row| row_matches_domain_message(row, domain_id, after_sequence))
         .collect();
 
-    filtered_rows.sort_by_key(|row| {
-        row.get(2)
-            .and_then(Value::as_u64)
-            .unwrap_or(u64::MAX)
-    });
+    filtered_rows.sort_by_key(|row| row.get(2).and_then(Value::as_u64).unwrap_or(u64::MAX));
     filtered_rows.truncate(limit);
 
     let schema = queries[0].get("schema").cloned().unwrap_or(Value::Null);
@@ -364,14 +418,16 @@ fn row_matches_domain_message(row: &Value, domain_id: u64, after_sequence: Optio
     let row_sequence = cols.get(2).and_then(Value::as_u64);
 
     match (row_domain_id, row_sequence) {
-        (Some(row_domain_id), Some(row_sequence)) if row_domain_id == domain_id => {
-            after_sequence.map(|after| row_sequence > after).unwrap_or(true)
-        }
+        (Some(row_domain_id), Some(row_sequence)) if row_domain_id == domain_id => after_sequence
+            .map(|after| row_sequence > after)
+            .unwrap_or(true),
         _ => false,
     }
 }
 
-fn parse_json_response(response: &near::agent::host::HttpResponse) -> Result<serde_json::Value, String> {
+fn parse_json_response(
+    response: &near::agent::host::HttpResponse,
+) -> Result<serde_json::Value, String> {
     if !(200..300).contains(&response.status) {
         return Err(format!(
             "HTTP request failed with status {}: {}",
@@ -397,6 +453,15 @@ fn validate_input_length(value: &str, field_name: &str) -> Result<(), String> {
 const SCHEMA: &str = r#"{
   "type": "object",
   "oneOf": [
+    {
+      "properties": {
+        "action": { "const": "signup" },
+        "database": { "type": "string" },
+        "handle": { "type": "string" },
+        "base_url": { "type": "string" }
+      },
+      "required": ["action", "database", "handle"]
+    },
     {
       "properties": {
         "action": { "const": "sql" },
