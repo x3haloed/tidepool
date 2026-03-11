@@ -111,6 +111,7 @@ pub struct Message {
     #[auto_inc]
     message_id: u64,
     domain_id: u64,
+    domain_sequence: u64,
     author_account_id: u64,
     authenticated_key_identity: Identity,
     body: String,
@@ -445,6 +446,7 @@ pub fn post_message(
     ctx.db.message().insert(Message {
         message_id: 0,
         domain_id,
+        domain_sequence: next_domain_sequence(ctx, domain_id),
         author_account_id: sender_account.account_id,
         authenticated_key_identity: ctx.sender(),
         body,
@@ -531,16 +533,10 @@ fn active_account_id_for_view_identity(ctx: &ViewContext, identity: Identity) ->
 fn ensure_named_domain_claim_allowed(ctx: &ReducerContext, account_id: u64) -> Result<(), String> {
     let cutoff_micros =
         ctx.timestamp.to_micros_since_unix_epoch() - DOMAIN_CLAIM_WINDOW_SECS * 1_000_000;
-    let recent_claims = ctx
-        .db
-        .domain()
-        .iter()
-        .filter(|domain| {
-            domain.kind != DomainKind::Dm
-                && domain.created_by_account_id == account_id
-                && domain.created_at.to_micros_since_unix_epoch() >= cutoff_micros
-        })
-        .count();
+    let recent_claims = count_recent_named_domain_claims(ctx.db.domain().iter().filter(|domain| {
+        domain.created_by_account_id == account_id
+            && domain.created_at.to_micros_since_unix_epoch() >= cutoff_micros
+    }));
 
     if recent_claims >= MAX_NAMED_DOMAIN_CLAIMS_PER_WINDOW {
         return Err(format!(
@@ -679,6 +675,20 @@ fn find_subscription(
     })
 }
 
+fn next_domain_sequence(ctx: &ReducerContext, domain_id: u64) -> u64 {
+    next_domain_sequence_from_existing(
+        ctx.db
+            .message()
+            .messages_by_domain_id()
+            .filter(domain_id)
+            .map(|message| message.domain_sequence),
+    )
+}
+
+fn next_domain_sequence_from_existing(existing_sequences: impl Iterator<Item = u64>) -> u64 {
+    existing_sequences.max().unwrap_or(0) + 1
+}
+
 fn find_existing_dm(ctx: &ReducerContext, participant_account_ids: &[u64]) -> Option<Domain> {
     ctx.db.domain().iter().find(|domain| {
         if domain.kind != DomainKind::Dm {
@@ -694,28 +704,44 @@ fn canonicalize_dm_participants(
     sender_account_id: u64,
     recipient_account_ids: Vec<u64>,
 ) -> Result<Vec<u64>, String> {
-    if recipient_account_ids.is_empty() {
-        return Err("DM creation requires at least one recipient.".to_string());
+    let participant_account_ids =
+        normalize_dm_participant_account_ids(sender_account_id, recipient_account_ids);
+    if participant_account_ids.len() < 2 {
+        return Err("DM creation requires at least one other active account.".to_string());
     }
 
+    for account_id in participant_account_ids.iter().copied() {
+        if account_id == sender_account_id {
+            continue;
+        }
+        require_active_account(ctx, account_id)?;
+    }
+
+    Ok(participant_account_ids)
+}
+
+fn normalize_dm_participant_account_ids(
+    sender_account_id: u64,
+    recipient_account_ids: Vec<u64>,
+) -> Vec<u64> {
     let mut participant_account_ids = vec![sender_account_id];
     for account_id in recipient_account_ids {
         if account_id == sender_account_id {
             continue;
         }
-        require_active_account(ctx, account_id)?;
         if !participant_account_ids.contains(&account_id) {
             participant_account_ids.push(account_id);
         }
     }
 
     participant_account_ids.sort_unstable();
+    participant_account_ids
+}
 
-    if participant_account_ids.len() < 2 {
-        return Err("DM creation requires at least one other active account.".to_string());
-    }
-
-    Ok(participant_account_ids)
+fn count_recent_named_domain_claims(domains: impl Iterator<Item = Domain>) -> usize {
+    domains
+        .filter(|domain| domain.kind != DomainKind::Dm)
+        .count()
 }
 
 fn dm_member_account_ids(ctx: &ReducerContext, domain_id: u64) -> Vec<u64> {
@@ -868,4 +894,88 @@ fn validate_message_body(body: &str, message_char_limit: usize) -> Result<(), St
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn next_domain_sequence_starts_at_one() {
+        assert_eq!(next_domain_sequence_from_existing([].into_iter()), 1);
+    }
+
+    #[test]
+    fn next_domain_sequence_advances_from_max_seen_value() {
+        assert_eq!(
+            next_domain_sequence_from_existing([1, 2, 7, 3].into_iter()),
+            8
+        );
+    }
+
+    #[test]
+    fn normalize_dm_participants_sorts_dedupes_and_includes_sender() {
+        let participants = normalize_dm_participant_account_ids(10, vec![12, 10, 11, 12, 9]);
+        assert_eq!(participants, vec![9, 10, 11, 12]);
+    }
+
+    #[test]
+    fn normalize_dm_participants_can_collapse_to_sender_only() {
+        let participants = normalize_dm_participant_account_ids(10, vec![10, 10]);
+        assert_eq!(participants, vec![10]);
+    }
+
+    #[test]
+    fn count_recent_named_domain_claims_ignores_dm_domains() {
+        let domains = vec![
+            Domain {
+                domain_id: 1,
+                kind: DomainKind::Public,
+                slug: "alpha".to_string(),
+                title: "Alpha".to_string(),
+                created_by_account_id: 1,
+                created_at: Timestamp::from_micros_since_unix_epoch(1),
+                message_char_limit: DEFAULT_MESSAGE_CHAR_LIMIT,
+            },
+            Domain {
+                domain_id: 2,
+                kind: DomainKind::Dm,
+                slug: String::new(),
+                title: "DM".to_string(),
+                created_by_account_id: 1,
+                created_at: Timestamp::from_micros_since_unix_epoch(1),
+                message_char_limit: DEFAULT_MESSAGE_CHAR_LIMIT,
+            },
+            Domain {
+                domain_id: 3,
+                kind: DomainKind::Private,
+                slug: "beta".to_string(),
+                title: "Beta".to_string(),
+                created_by_account_id: 1,
+                created_at: Timestamp::from_micros_since_unix_epoch(1),
+                message_char_limit: DEFAULT_MESSAGE_CHAR_LIMIT,
+            },
+        ];
+
+        assert_eq!(count_recent_named_domain_claims(domains.into_iter()), 2);
+    }
+
+    #[test]
+    fn validate_message_body_rejects_blank_messages() {
+        assert!(validate_message_body("   ", 10).is_err());
+    }
+
+    #[test]
+    fn validate_message_body_enforces_character_limit() {
+        assert!(validate_message_body("hello", 4).is_err());
+        assert!(validate_message_body("hello", 5).is_ok());
+    }
+
+    #[test]
+    fn normalize_batch_window_uses_default_for_zero() {
+        assert_eq!(
+            normalize_batch_window(0).expect("zero should map to default"),
+            DEFAULT_BATCH_WINDOW_SECONDS
+        );
+    }
 }

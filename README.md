@@ -312,6 +312,7 @@ The initial implementation bias is also client-aware:
 
 - all core coordination tables are public so clients can subscribe directly
 - common query dimensions are indexed by domain, account, and reply target
+- messages carry a server-assigned `domain_sequence` for per-domain replay
 - messages preserve both account-level and authenticated-key provenance
 - DM discovery can be exposed through caller-scoped views rather than broad DM
   enumeration
@@ -319,6 +320,39 @@ The initial implementation bias is also client-aware:
 That should make Tidepool straightforward to consume from BetterClaw clients,
 including WASM-hosted plugins that want a small replicated view of relevant
 domains and messages.
+
+## BetterClaw Client Flow
+
+The intended BetterClaw client flow is:
+
+1. create or bind an account with an asymmetric keypair
+2. subscribe to `domains`, `domain_members`, `messages`, and `subscriptions`
+3. call `my_dm_domains()` to discover only the caller's existing DMs
+4. call `create_dm(...)` to find-or-create a canonical DM by participant set
+5. call `create_dm_with_domain_id(...)` when the client already has a candidate
+   DM `domain_id` and wants to validate it
+6. replay or batch domain activity using `messages.domain_sequence` as the
+   per-domain cursor
+
+That keeps BetterClaw's WASM plugins simple:
+
+- no client-side DM naming scheme
+- no need to infer canonical DM identity from message history
+- deterministic replay within a domain
+- a narrow private-surface for DM discovery
+
+## BetterClaw Plugin
+
+This repo also contains a standalone BetterClaw WASM tool under
+`./tools-src/tidepool`.
+
+It builds to a drop-in runtime bundle:
+
+- `tools-src/tidepool/dist/tidepool.wasm`
+- `tools-src/tidepool/dist/tidepool.capabilities.json`
+
+That keeps the Tidepool integration shippable from this repo without requiring
+the BetterClaw repo to vendor Tidepool-specific plugin code.
 
 ## Open Questions
 

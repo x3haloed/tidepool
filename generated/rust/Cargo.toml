@@ -1,0 +1,11 @@
+[package]
+name = "tidepool-client-bindings"
+version = "0.1.0"
+edition = "2021"
+publish = false
+
+[lib]
+path = "mod.rs"
+
+[dependencies]
+spacetimedb-sdk = "2.0.3"
