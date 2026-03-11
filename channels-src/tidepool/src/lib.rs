@@ -65,6 +65,15 @@ struct TidepoolMessageRow {
     body: String,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct TidepoolInboundMessage {
+    message_id: u64,
+    domain_id: u64,
+    domain_sequence: u64,
+    author_account_id: u64,
+    body: String,
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 struct TidepoolReplyMetadata {
     base_url: String,
@@ -74,6 +83,7 @@ struct TidepoolReplyMetadata {
     message_char_limit: u16,
     reply_to_message_id: Option<u64>,
     last_seen_domain_sequence: u64,
+    messages: Vec<TidepoolInboundMessage>,
 }
 
 impl Guest for TidepoolChannel {
@@ -262,6 +272,16 @@ fn poll_once() -> Result<(), String> {
             message_char_limit: subscription.message_char_limit,
             reply_to_message_id: Some(last_message.message_id),
             last_seen_domain_sequence: last_message.domain_sequence,
+            messages: messages
+                .iter()
+                .map(|message| TidepoolInboundMessage {
+                    message_id: message.message_id,
+                    domain_id: message.domain_id,
+                    domain_sequence: message.domain_sequence,
+                    author_account_id: message.author_account_id,
+                    body: message.body.clone(),
+                })
+                .collect(),
         };
 
         let content = render_batch_message(&subscription, &messages);
@@ -300,6 +320,10 @@ fn render_batch_message(
         display_domain_name(subscription),
         messages.len()
     )];
+
+    lines.push(
+        "Structured inbound details are available via the `current_message` tool.".to_string(),
+    );
 
     if subscription.batch_window_seconds > 0 {
         lines.push(format!(
