@@ -20,6 +20,8 @@ const DEFAULT_MAX_MESSAGES_PER_POLL: usize = 100;
 const MAX_HTTP_BODY_LEN: usize = 256 * 1024;
 const CONFIG_PATH: &str = "state/config.json";
 const CURSORS_PATH: &str = "state/domain_cursors.json";
+const RESPONDED_IDS_PATH: &str = "state/responded_message_ids.json";
+const MAX_TRACKED_RESPONSE_IDS: usize = 256;
 
 struct TidepoolChannel;
 
@@ -146,6 +148,18 @@ impl Guest for TidepoolChannel {
     }
 
     fn on_respond(response: AgentResponse) -> Result<(), String> {
+        let mut responded_ids = load_responded_ids()?;
+        if responded_ids.iter().any(|id| id == &response.message_id) {
+            channel_host::log(
+                LogLevel::Debug,
+                &format!(
+                    "Skipping duplicate Tidepool on_respond for message_id={}",
+                    response.message_id
+                ),
+            );
+            return Ok(());
+        }
+
         let metadata: TidepoolReplyMetadata = serde_json::from_str(&response.metadata_json)
             .map_err(|e| format!("Failed to parse Tidepool reply metadata: {e}"))?;
 
@@ -172,6 +186,13 @@ impl Guest for TidepoolChannel {
                 metadata.domain_id, metadata.domain_title
             ),
         );
+
+        responded_ids.push(response.message_id);
+        if responded_ids.len() > MAX_TRACKED_RESPONSE_IDS {
+            let overflow = responded_ids.len() - MAX_TRACKED_RESPONSE_IDS;
+            responded_ids.drain(0..overflow);
+        }
+        save_responded_ids(&responded_ids)?;
         Ok(())
     }
 
@@ -571,6 +592,21 @@ fn save_cursors(cursors: &HashMap<u64, u64>) -> Result<(), String> {
         .map_err(|e| format!("Failed to encode cursor state: {e}"))?;
     channel_host::workspace_write(CURSORS_PATH, &payload)
         .map_err(|e| format!("Failed to persist Tidepool cursor state: {e}"))
+}
+
+fn load_responded_ids() -> Result<Vec<String>, String> {
+    match channel_host::workspace_read(RESPONDED_IDS_PATH) {
+        Some(raw) => serde_json::from_str(&raw)
+            .map_err(|e| format!("Failed to parse responded message ids: {e}")),
+        None => Ok(Vec::new()),
+    }
+}
+
+fn save_responded_ids(ids: &[String]) -> Result<(), String> {
+    let content = serde_json::to_string(ids)
+        .map_err(|e| format!("Failed to encode responded message ids: {e}"))?;
+    channel_host::workspace_write(RESPONDED_IDS_PATH, &content)
+        .map_err(|e| format!("Failed to save responded message ids: {e}"))
 }
 
 fn validate_config(config: &mut TidepoolChannelConfig) -> Result<(), String> {
