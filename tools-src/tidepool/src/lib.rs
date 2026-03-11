@@ -4,7 +4,7 @@ wit_bindgen::generate!({
 });
 
 use serde::{Deserialize, Serialize};
-use serde_json::json;
+use serde_json::{Value, json};
 
 const DEFAULT_BASE_URL: &str = "https://spacetimedb.com";
 const DEFAULT_MESSAGE_LIMIT: u32 = 100;
@@ -137,7 +137,7 @@ fn execute_inner(params: &str) -> Result<String, String> {
             message_char_limit,
             base_url,
         } => {
-            let kind = normalize_domain_kind(&kind)?;
+            let kind = encode_domain_kind(&kind)?;
             call_reducer(
                 resolve_base_url(base_url)?,
                 &database,
@@ -209,11 +209,7 @@ fn execute_inner(params: &str) -> Result<String, String> {
         TidepoolAction::MyDmDomains { database, base_url } => ToolOutput {
             ok: true,
             action: "my_dm_domains",
-            data: sql_query(
-                resolve_base_url(base_url)?,
-                &database,
-                "SELECT domain_id, title, participant_account_ids FROM my_dm_domains ORDER BY domain_id",
-            )?,
+            data: sql_query(resolve_base_url(base_url)?, &database, "SELECT domain_id, title, participant_account_ids FROM my_dm_domains")?,
         },
         TidepoolAction::GetDomainMessages {
             database,
@@ -224,10 +220,15 @@ fn execute_inner(params: &str) -> Result<String, String> {
         } => ToolOutput {
             ok: true,
             action: "get_domain_messages",
-            data: sql_query(
+            data: filter_message_rows(
+                sql_query(
                 resolve_base_url(base_url)?,
                 &database,
-                &build_messages_sql(domain_id, after_sequence, limit.unwrap_or(DEFAULT_MESSAGE_LIMIT)),
+                "SELECT message_id, domain_id, domain_sequence, author_account_id, body, created_at, reply_to_message_id FROM message",
+            )?,
+                domain_id,
+                after_sequence,
+                limit.unwrap_or(DEFAULT_MESSAGE_LIMIT),
             )?,
         },
     };
@@ -251,42 +252,19 @@ fn validate_base_url(base_url: &str) -> Result<(), String> {
     Ok(())
 }
 
-fn normalize_domain_kind(kind: &str) -> Result<&'static str, String> {
+fn encode_domain_kind(kind: &str) -> Result<Value, String> {
     match kind {
-        "public" | "Public" => Ok("Public"),
-        "private" | "Private" => Ok("Private"),
-        "dm" | "Dm" | "DM" => Ok("Dm"),
+        "public" | "Public" => Ok(json!([0, []])),
+        "private" | "Private" => Ok(json!([1, []])),
+        "dm" | "Dm" | "DM" => Ok(json!([2, []])),
         _ => Err("kind must be one of: public, private, dm".to_string()),
-    }
-}
-
-fn build_messages_sql(domain_id: u64, after_sequence: Option<u64>, limit: u32) -> String {
-    let limit = limit.min(DEFAULT_MESSAGE_LIMIT);
-    match after_sequence {
-        Some(after_sequence) => format!(
-            "SELECT message_id, domain_id, domain_sequence, author_account_id, body, created_at, reply_to_message_id \
-             FROM message \
-             WHERE domain_id = {} AND domain_sequence > {} \
-             ORDER BY domain_sequence ASC \
-             LIMIT {}",
-            domain_id, after_sequence, limit
-        ),
-        None => format!(
-            "SELECT message_id, domain_id, domain_sequence, author_account_id, body, created_at, reply_to_message_id \
-             FROM message \
-             WHERE domain_id = {} \
-             ORDER BY domain_sequence ASC \
-             LIMIT {}",
-            domain_id, limit
-        ),
     }
 }
 
 fn sql_query(base_url: String, database: &str, sql: &str) -> Result<serde_json::Value, String> {
     validate_input_length(sql, "sql")?;
     let url = format!("{}/v1/database/{}/sql", base_url, database);
-    let body = json!({ "query": sql });
-    let response = http_post_json(&url, &body)?;
+    let response = http_post_text(&url, sql, "text/plain")?;
     parse_json_response(&response)
 }
 
@@ -310,14 +288,87 @@ fn call_reducer(
 
 fn http_post_json(url: &str, body: &serde_json::Value) -> Result<near::agent::host::HttpResponse, String> {
     let body_bytes = serde_json::to_vec(body).map_err(|e| format!("Failed to encode JSON body: {e}"))?;
+    http_post_bytes(url, &body_bytes, "{\"content-type\":\"application/json\"}")
+}
+
+fn http_post_text(
+    url: &str,
+    body: &str,
+    content_type: &str,
+) -> Result<near::agent::host::HttpResponse, String> {
+    validate_input_length(body, "http body")?;
+    http_post_bytes(
+        url,
+        body.as_bytes(),
+        &format!("{{\"content-type\":\"{}\"}}", content_type),
+    )
+}
+
+fn http_post_bytes(
+    url: &str,
+    body: &[u8],
+    headers_json: &str,
+) -> Result<near::agent::host::HttpResponse, String> {
     Ok(near::agent::host::http_request(
         "POST",
         url,
-        "{\"content-type\":\"application/json\"}",
-        Some(&body_bytes),
+        headers_json,
+        Some(body),
         None,
     )
     .map_err(|e| format!("HTTP request failed: {e}"))?)
+}
+
+fn filter_message_rows(
+    sql_result: Value,
+    domain_id: u64,
+    after_sequence: Option<u64>,
+    limit: u32,
+) -> Result<Value, String> {
+    let limit = limit.min(DEFAULT_MESSAGE_LIMIT) as usize;
+    let Some(queries) = sql_result.as_array() else {
+        return Err("Unexpected SQL response shape: expected top-level array".to_string());
+    };
+    if queries.is_empty() {
+        return Ok(json!([]));
+    }
+
+    let mut filtered_rows: Vec<Value> = queries[0]
+        .get("rows")
+        .and_then(Value::as_array)
+        .cloned()
+        .unwrap_or_default()
+        .into_iter()
+        .filter(|row| row_matches_domain_message(row, domain_id, after_sequence))
+        .collect();
+
+    filtered_rows.sort_by_key(|row| {
+        row.get(2)
+            .and_then(Value::as_u64)
+            .unwrap_or(u64::MAX)
+    });
+    filtered_rows.truncate(limit);
+
+    let schema = queries[0].get("schema").cloned().unwrap_or(Value::Null);
+    Ok(json!({
+        "schema": schema,
+        "rows": filtered_rows
+    }))
+}
+
+fn row_matches_domain_message(row: &Value, domain_id: u64, after_sequence: Option<u64>) -> bool {
+    let Some(cols) = row.as_array() else {
+        return false;
+    };
+    let row_domain_id = cols.get(1).and_then(Value::as_u64);
+    let row_sequence = cols.get(2).and_then(Value::as_u64);
+
+    match (row_domain_id, row_sequence) {
+        (Some(row_domain_id), Some(row_sequence)) if row_domain_id == domain_id => {
+            after_sequence.map(|after| row_sequence > after).unwrap_or(true)
+        }
+        _ => false,
+    }
 }
 
 fn parse_json_response(response: &near::agent::host::HttpResponse) -> Result<serde_json::Value, String> {
