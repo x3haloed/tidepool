@@ -52,6 +52,7 @@ struct TidepoolSubscriptionRow {
     domain_id: u64,
     slug: String,
     title: String,
+    message_char_limit: u16,
     batch_window_seconds: u32,
 }
 
@@ -62,8 +63,6 @@ struct TidepoolMessageRow {
     domain_sequence: u64,
     author_account_id: u64,
     body: String,
-    created_at: i64,
-    reply_to_message_id: Option<u64>,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -72,6 +71,7 @@ struct TidepoolReplyMetadata {
     database: String,
     domain_id: u64,
     domain_title: String,
+    message_char_limit: u16,
     reply_to_message_id: Option<u64>,
     last_seen_domain_sequence: u64,
 }
@@ -126,7 +126,8 @@ impl Guest for TidepoolChannel {
         let metadata: TidepoolReplyMetadata = serde_json::from_str(&response.metadata_json)
             .map_err(|e| format!("Failed to parse Tidepool reply metadata: {e}"))?;
 
-        if response.content.trim().is_empty() {
+        let body = clamp_message_body(&response.content, metadata.message_char_limit as usize);
+        if body.is_empty() {
             return Ok(());
         }
 
@@ -136,8 +137,8 @@ impl Guest for TidepoolChannel {
             "post_message",
             json!([
                 metadata.domain_id,
-                response.content,
-                metadata.reply_to_message_id
+                body,
+                encode_optional_u64(metadata.reply_to_message_id)
             ]),
         )?;
 
@@ -159,7 +160,21 @@ impl Guest for TidepoolChannel {
 fn poll_once() -> Result<(), String> {
     let config = load_config()?;
     let account = fetch_my_account(&config)?;
+    channel_host::log(
+        LogLevel::Debug,
+        &format!(
+            "Tidepool poll account: id={} handle={}",
+            account.account_id, account.handle
+        ),
+    );
     let subscriptions = fetch_my_subscriptions(&config)?;
+    channel_host::log(
+        LogLevel::Debug,
+        &format!(
+            "Tidepool poll subscriptions fetched: {}",
+            subscriptions.len()
+        ),
+    );
     if subscriptions.is_empty() {
         channel_host::log(
             LogLevel::Debug,
@@ -174,26 +189,49 @@ fn poll_once() -> Result<(), String> {
         .collect();
 
     let mut cursors = load_cursors()?;
+    channel_host::log(
+        LogLevel::Debug,
+        &format!("Tidepool poll cursors loaded: {:?}", cursors),
+    );
     let mut unseen_messages = fetch_my_subscribed_messages(&config)?;
+    channel_host::log(
+        LogLevel::Debug,
+        &format!(
+            "Tidepool poll subscribed messages fetched before filtering: {}",
+            unseen_messages.len()
+        ),
+    );
     unseen_messages.retain(|message| {
         message.domain_sequence > cursors.get(&message.domain_id).copied().unwrap_or(0)
     });
+    channel_host::log(
+        LogLevel::Debug,
+        &format!(
+            "Tidepool poll messages after cursor filtering: {}",
+            unseen_messages.len()
+        ),
+    );
 
     if !config.emit_self_messages {
         unseen_messages.retain(|message| message.author_account_id != account.account_id);
+        channel_host::log(
+            LogLevel::Debug,
+            &format!(
+                "Tidepool poll messages after self-filtering: {}",
+                unseen_messages.len()
+            ),
+        );
     }
 
     if unseen_messages.is_empty() {
+        channel_host::log(
+            LogLevel::Debug,
+            "Tidepool poll found no unseen messages to emit.",
+        );
         return Ok(());
     }
 
-    unseen_messages.sort_by_key(|message| {
-        (
-            message.created_at,
-            message.domain_id,
-            message.domain_sequence,
-        )
-    });
+    unseen_messages.sort_by_key(|message| (message.domain_id, message.domain_sequence));
     unseen_messages.truncate(config.max_messages_per_poll);
 
     let mut grouped: BTreeMap<u64, Vec<TidepoolMessageRow>> = BTreeMap::new();
@@ -203,6 +241,13 @@ fn poll_once() -> Result<(), String> {
 
     for (domain_id, messages) in grouped {
         let Some(subscription) = subscriptions_by_domain.remove(&domain_id) else {
+            channel_host::log(
+                LogLevel::Warn,
+                &format!(
+                    "Tidepool poll dropping messages for domain {} because subscription metadata was missing",
+                    domain_id
+                ),
+            );
             continue;
         };
         let Some(last_message) = messages.last() else {
@@ -214,6 +259,7 @@ fn poll_once() -> Result<(), String> {
             database: config.database.clone(),
             domain_id,
             domain_title: subscription.title.clone(),
+            message_char_limit: subscription.message_char_limit,
             reply_to_message_id: Some(last_message.message_id),
             last_seen_domain_sequence: last_message.domain_sequence,
         };
@@ -229,6 +275,15 @@ fn poll_once() -> Result<(), String> {
             thread_id: Some(format!("tidepool:domain:{domain_id}")),
             metadata_json,
         });
+        channel_host::log(
+            LogLevel::Info,
+            &format!(
+                "Tidepool emitted {} message(s) for domain {} at sequence {}",
+                messages.len(),
+                domain_id,
+                last_message.domain_sequence
+            ),
+        );
 
         cursors.insert(domain_id, last_message.domain_sequence);
     }
@@ -256,13 +311,10 @@ fn render_batch_message(
     lines.push(String::new());
 
     for message in messages {
-        let mut line = format!(
+        let line = format!(
             "- seq {} from account {}",
             message.domain_sequence, message.author_account_id
         );
-        if let Some(reply_to) = message.reply_to_message_id {
-            line.push_str(&format!(" (reply to #{reply_to})"));
-        }
         lines.push(line);
         lines.push(message.body.clone());
         lines.push(String::new());
@@ -302,16 +354,30 @@ fn fetch_my_subscriptions(
         "SELECT domain_id, slug, title, message_char_limit, batch_window_seconds FROM my_subscriptions",
     )?;
 
-    rows.into_iter()
-        .map(|row| {
+    let parsed: Vec<TidepoolSubscriptionRow> = rows
+        .into_iter()
+        .map(|row| -> Result<TidepoolSubscriptionRow, String> {
             Ok(TidepoolSubscriptionRow {
                 domain_id: row_u64(&row, 0, "domain_id")?,
                 slug: row_string(&row, 1, "slug")?,
                 title: row_string(&row, 2, "title")?,
+                message_char_limit: row_u64(&row, 3, "message_char_limit")? as u16,
                 batch_window_seconds: row_u64(&row, 4, "batch_window_seconds")? as u32,
             })
         })
-        .collect()
+        .collect::<Result<_, _>>()?;
+
+    for subscription in &parsed {
+        channel_host::log(
+            LogLevel::Debug,
+            &format!(
+                "Tidepool subscription row: domain_id={} slug={} title={}",
+                subscription.domain_id, subscription.slug, subscription.title
+            ),
+        );
+    }
+
+    Ok(parsed)
 }
 
 fn fetch_my_subscribed_messages(
@@ -319,22 +385,36 @@ fn fetch_my_subscribed_messages(
 ) -> Result<Vec<TidepoolMessageRow>, String> {
     let rows = sql_rows(
         config,
-        "SELECT message_id, domain_id, domain_sequence, author_account_id, body, created_at, reply_to_message_id FROM my_subscribed_messages",
+        "SELECT message_id, domain_id, domain_sequence, author_account_id, body FROM my_subscribed_messages",
     )?;
 
-    rows.into_iter()
-        .map(|row| {
+    let parsed: Vec<TidepoolMessageRow> = rows
+        .into_iter()
+        .map(|row| -> Result<TidepoolMessageRow, String> {
             Ok(TidepoolMessageRow {
                 message_id: row_u64(&row, 0, "message_id")?,
                 domain_id: row_u64(&row, 1, "domain_id")?,
                 domain_sequence: row_u64(&row, 2, "domain_sequence")?,
                 author_account_id: row_u64(&row, 3, "author_account_id")?,
                 body: row_string(&row, 4, "body")?,
-                created_at: row_i64(&row, 5, "created_at")?,
-                reply_to_message_id: row_optional_u64(&row, 6)?,
             })
         })
-        .collect()
+        .collect::<Result<_, _>>()?;
+
+    for message in &parsed {
+        channel_host::log(
+            LogLevel::Debug,
+            &format!(
+                "Tidepool subscribed message row: id={} domain={} seq={} author={}",
+                message.message_id,
+                message.domain_id,
+                message.domain_sequence,
+                message.author_account_id
+            ),
+        );
+    }
+
+    Ok(parsed)
 }
 
 fn sql_rows(config: &TidepoolChannelConfig, sql: &str) -> Result<Vec<Value>, String> {
@@ -361,6 +441,32 @@ fn call_reducer(base_url: &str, database: &str, reducer: &str, args: Value) -> R
         ));
     }
     Ok(())
+}
+
+fn encode_optional_u64(value: Option<u64>) -> Value {
+    match value {
+        Some(id) => json!([0, id]),
+        None => Value::Null,
+    }
+}
+
+fn clamp_message_body(body: &str, max_chars: usize) -> String {
+    let trimmed = body.trim();
+    if trimmed.is_empty() || max_chars == 0 {
+        return String::new();
+    }
+
+    let char_count = trimmed.chars().count();
+    if char_count <= max_chars {
+        return trimmed.to_string();
+    }
+
+    if max_chars <= 3 {
+        return ".".repeat(max_chars);
+    }
+
+    let shortened: String = trimmed.chars().take(max_chars - 3).collect();
+    format!("{shortened}...")
 }
 
 fn http_post_json(url: &str, body: &Value) -> Result<HttpResponse, String> {
@@ -451,33 +557,12 @@ fn row_u64(row: &Value, index: usize, field_name: &str) -> Result<u64, String> {
         .ok_or_else(|| format!("Missing or invalid {field_name} column"))
 }
 
-fn row_i64(row: &Value, index: usize, field_name: &str) -> Result<i64, String> {
-    row_array(row)?
-        .get(index)
-        .and_then(Value::as_i64)
-        .ok_or_else(|| format!("Missing or invalid {field_name} column"))
-}
-
 fn row_string(row: &Value, index: usize, field_name: &str) -> Result<String, String> {
     row_array(row)?
         .get(index)
         .and_then(Value::as_str)
         .map(ToString::to_string)
         .ok_or_else(|| format!("Missing or invalid {field_name} column"))
-}
-
-fn row_optional_u64(row: &Value, index: usize) -> Result<Option<u64>, String> {
-    let value = row_array(row)?
-        .get(index)
-        .ok_or_else(|| "Missing optional column".to_string())?;
-    if value.is_null() {
-        Ok(None)
-    } else {
-        value
-            .as_u64()
-            .map(Some)
-            .ok_or_else(|| "Invalid optional u64 column".to_string())
-    }
 }
 
 fn json_response(status: u16, body: Value) -> OutgoingHttpResponse {
