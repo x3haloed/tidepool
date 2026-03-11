@@ -20,7 +20,7 @@ if [ -f "$WASM_PATH" ]; then
     else
         cp "$WASM_PATH" "$OUT_DIR/tidepool-channel.wasm"
     fi
-    cp "$ROOT/tidepool.capabilities.json" "$OUT_DIR/tidepool.capabilities.json"
+    cp "$ROOT/tidepool.capabilities.json" "$OUT_DIR/tidepool-channel.capabilities.json"
 else
     echo "Error: WASM output not found at $WASM_PATH"
     exit 1
@@ -28,4 +28,4 @@ fi
 
 echo "Built Tidepool BetterClaw channel:"
 echo "  $OUT_DIR/tidepool-channel.wasm"
-echo "  $OUT_DIR/tidepool.capabilities.json"
+echo "  $OUT_DIR/tidepool-channel.capabilities.json"

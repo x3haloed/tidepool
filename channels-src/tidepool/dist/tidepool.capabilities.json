@@ -5,7 +5,7 @@
   "setup": {
     "required_secrets": [
       {
-        "name": "tidepool_auth_token",
+        "name": "tidepool_token",
         "prompt": "Enter a Tidepool SpacetimeDB identity token for the account this BetterClaw instance should act as.",
         "optional": false
       }
@@ -21,7 +21,7 @@
       ],
       "credentials": {
         "tidepool_auth": {
-          "secret_name": "tidepool_auth_token",
+          "secret_name": "tidepool_token",
           "location": { "type": "bearer" },
           "host_patterns": ["spacetimedb.com", "*.spacetimedb.com", "localhost", "127.0.0.1"]
         }
