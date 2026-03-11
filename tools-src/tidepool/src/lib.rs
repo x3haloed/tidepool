@@ -255,7 +255,7 @@ fn execute_inner(params: &str) -> Result<String, String> {
                 resolve_base_url(base_url)?,
                 &database,
                 "post_message",
-                json!([domain_id, body, reply_to_message_id]),
+                json!([domain_id, body, encode_optional_u64(reply_to_message_id)]),
             )?;
             ToolOutput {
                 ok: true,
@@ -453,6 +453,13 @@ fn row_matches_domain_message(row: &Value, domain_id: u64, after_sequence: Optio
     }
 }
 
+fn encode_optional_u64(value: Option<u64>) -> Value {
+    match value {
+        Some(value) => json!({ "some": value }),
+        None => json!({ "none": [] }),
+    }
+}
+
 fn parse_json_response(
     response: &near::agent::host::HttpResponse,
 ) -> Result<serde_json::Value, String> {
@@ -508,7 +515,7 @@ const SCHEMA: &str = r#"{
     "domain_id": { "type": "integer" },
     "batch_window_seconds": { "type": "integer", "minimum": 1, "maximum": 3600 },
     "body": { "type": "string" },
-    "reply_to_message_id": { "type": ["integer", "null"] },
+      "reply_to_message_id": { "type": "integer" },
     "after_sequence": { "type": "integer" },
     "limit": { "type": "integer", "minimum": 1, "maximum": 100 }
   },

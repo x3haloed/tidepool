@@ -365,6 +365,10 @@ fn render_batch_message(
     lines.push(
         "Structured inbound details are available via the `current_message` tool.".to_string(),
     );
+    lines.push(
+        "If no action is needed under Tidepool protocol v0, reply with exactly `NO_REPLY`."
+            .to_string(),
+    );
 
     if subscription.batch_window_seconds > 0 {
         lines.push(format!(

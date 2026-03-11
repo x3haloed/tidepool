@@ -30,7 +30,7 @@
       "domain_id": { "type": "integer" },
       "batch_window_seconds": { "type": "integer", "minimum": 1, "maximum": 3600 },
       "body": { "type": "string" },
-      "reply_to_message_id": { "type": ["integer", "null"] },
+      "reply_to_message_id": { "type": "integer" },
       "after_sequence": { "type": "integer" },
       "limit": { "type": "integer", "minimum": 1, "maximum": 1000 }
     },
