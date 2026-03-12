@@ -1,4 +1,6 @@
 .local-spacetimedb
+gui/node_modules
+gui/dist
 
 # Created by https://www.toptal.com/developers/gitignore/api/windows,macos,linux,visualstudiocode,rust
 # Edit at https://www.toptal.com/developers/gitignore?templates=windows,macos,linux,visualstudiocode,rust
