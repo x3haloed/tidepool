@@ -167,6 +167,22 @@ impl Guest for TidepoolChannel {
         if body.is_empty() {
             return Ok(());
         }
+        if should_suppress_outbound_body(&body) {
+            channel_host::log(
+                LogLevel::Info,
+                &format!(
+                    "Suppressing non-coordination Tidepool reply for message_id={}",
+                    response.message_id
+                ),
+            );
+            responded_ids.push(response.message_id);
+            if responded_ids.len() > MAX_TRACKED_RESPONSE_IDS {
+                let overflow = responded_ids.len() - MAX_TRACKED_RESPONSE_IDS;
+                responded_ids.drain(0..overflow);
+            }
+            save_responded_ids(&responded_ids)?;
+            return Ok(());
+        }
 
         call_reducer(
             &metadata.base_url,
@@ -538,6 +554,26 @@ fn clamp_message_body(body: &str, max_chars: usize) -> String {
     format!("{shortened}...")
 }
 
+fn should_suppress_outbound_body(body: &str) -> bool {
+    let trimmed = body.trim();
+    if trimmed.is_empty() {
+        return true;
+    }
+
+    let normalized = trimmed.to_ascii_lowercase();
+
+    normalized == "no_reply"
+        || normalized == "i'm not sure how to respond to that."
+        || normalized.starts_with("error:")
+        || normalized.starts_with("tool error:")
+        || normalized.starts_with("approval needed:")
+        || normalized.starts_with("auth required:")
+        || normalized.contains("provider copilot request failed")
+        || normalized.contains("provider copilot rate limited")
+        || normalized.contains("http 429 too many requests")
+        || normalized.contains("rate limit exceeded")
+}
+
 fn http_post_json(url: &str, body: &Value) -> Result<HttpResponse, String> {
     let bytes = serde_json::to_vec(body).map_err(|e| format!("Failed to encode JSON body: {e}"))?;
     http_post_bytes(url, &bytes, "{\"content-type\":\"application/json\"}")
@@ -655,6 +691,38 @@ fn json_response(status: u16, body: Value) -> OutgoingHttpResponse {
         status,
         headers_json: "{\"content-type\":\"application/json\"}".to_string(),
         body,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::should_suppress_outbound_body;
+
+    #[test]
+    fn suppresses_generic_betterclaw_fallback() {
+        assert!(should_suppress_outbound_body(
+            "I'm not sure how to respond to that."
+        ));
+    }
+
+    #[test]
+    fn suppresses_provider_error_text() {
+        assert!(should_suppress_outbound_body(
+            "Error: LLM error: Provider copilot request failed: HTTP 429 Too Many Requests"
+        ));
+    }
+
+    #[test]
+    fn suppresses_control_responses() {
+        assert!(should_suppress_outbound_body("NO_REPLY"));
+        assert!(should_suppress_outbound_body("Approval needed: message"));
+    }
+
+    #[test]
+    fn keeps_real_coordination_content() {
+        assert!(!should_suppress_outbound_body(
+            "CLAIM CHIP: I will produce a DIFF for the reply_to boundary fix."
+        ));
     }
 }
 
