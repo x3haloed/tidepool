@@ -15,6 +15,7 @@ use exports::near::agent::channel::{
 use near::agent::channel_host::{self, EmittedMessage, HttpResponse, LogLevel};
 
 const DEFAULT_BASE_URL: &str = "https://spacetimedb.com";
+const DEFAULT_AGENT_USER_ID: &str = "default";
 const MIN_POLL_INTERVAL_MS: u32 = 30_000;
 const DEFAULT_MAX_MESSAGES_PER_POLL: usize = 100;
 const MAX_HTTP_BODY_LEN: usize = 256 * 1024;
@@ -81,6 +82,8 @@ struct TidepoolReplyMetadata {
     base_url: String,
     database: String,
     domain_id: u64,
+    #[serde(default)]
+    tidepool_target: String,
     domain_title: String,
     message_char_limit: u16,
     reply_to_message_id: Option<u64>,
@@ -344,6 +347,7 @@ fn poll_once() -> Result<(), String> {
             base_url: config.base_url.clone(),
             database: config.database.clone(),
             domain_id,
+            tidepool_target: format!("tidepool:domain:{domain_id}"),
             domain_title: subscription.title.clone(),
             message_char_limit: subscription.message_char_limit,
             reply_to_message_id: Some(last_message.message_id),
@@ -365,7 +369,7 @@ fn poll_once() -> Result<(), String> {
             .map_err(|e| format!("Failed to encode metadata: {e}"))?;
 
         channel_host::emit_message(&EmittedMessage {
-            user_id: format!("tidepool:domain:{domain_id}"),
+            user_id: DEFAULT_AGENT_USER_ID.to_string(),
             user_name: Some(subscription.title.clone()),
             content,
             thread_id: Some(format!("tidepool:domain:{domain_id}")),
