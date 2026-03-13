@@ -164,9 +164,6 @@ impl Guest for TidepoolChannel {
             .map_err(|e| format!("Failed to parse Tidepool reply metadata: {e}"))?;
 
         let body = clamp_message_body(&response.content, metadata.message_char_limit as usize);
-        if body.is_empty() {
-            return Ok(());
-        }
         if should_suppress_outbound_body(&body) {
             channel_host::log(
                 LogLevel::Info,
@@ -184,24 +181,14 @@ impl Guest for TidepoolChannel {
             return Ok(());
         }
 
-        call_reducer(
+        post_response_to_domain(
             &metadata.base_url,
             &metadata.database,
-            "post_message",
-            json!([
-                metadata.domain_id,
-                body,
-                encode_optional_u64(metadata.reply_to_message_id)
-            ]),
+            metadata.domain_id,
+            &metadata.domain_title,
+            body,
+            metadata.reply_to_message_id,
         )?;
-
-        channel_host::log(
-            LogLevel::Debug,
-            &format!(
-                "Posted Tidepool reply into domain {} ({})",
-                metadata.domain_id, metadata.domain_title
-            ),
-        );
 
         responded_ids.push(response.message_id);
         if responded_ids.len() > MAX_TRACKED_RESPONSE_IDS {
@@ -213,6 +200,38 @@ impl Guest for TidepoolChannel {
     }
 
     fn on_status(_update: StatusUpdate) {}
+
+    fn on_broadcast(user_id: String, response: AgentResponse) -> Result<(), String> {
+        let config = load_config()?;
+        let domain_id = parse_domain_user_id(&user_id)?;
+        let subscription = fetch_my_subscriptions(&config)?
+            .into_iter()
+            .find(|subscription| subscription.domain_id == domain_id)
+            .ok_or_else(|| {
+                format!(
+                    "Cannot broadcast to Tidepool domain {} because it is not an active subscription",
+                    domain_id
+                )
+            })?;
+
+        let body = clamp_message_body(&response.content, subscription.message_char_limit as usize);
+        if should_suppress_outbound_body(&body) {
+            channel_host::log(
+                LogLevel::Info,
+                &format!("Suppressing Tidepool broadcast into domain {}", domain_id),
+            );
+            return Ok(());
+        }
+
+        post_response_to_domain(
+            &config.base_url,
+            &config.database,
+            domain_id,
+            &subscription.title,
+            body,
+            None,
+        )
+    }
 
     fn on_shutdown() {}
 }
@@ -351,6 +370,7 @@ fn poll_once() -> Result<(), String> {
             content,
             thread_id: Some(format!("tidepool:domain:{domain_id}")),
             metadata_json,
+            attachments: vec![],
         });
         channel_host::log(
             LogLevel::Info,
@@ -533,6 +553,48 @@ fn encode_optional_u64(value: Option<u64>) -> Value {
         Some(id) => json!([0, id]),
         None => Value::Null,
     }
+}
+
+fn parse_domain_user_id(user_id: &str) -> Result<u64, String> {
+    user_id
+        .strip_prefix("tidepool:domain:")
+        .ok_or_else(|| {
+            format!(
+                "Unsupported Tidepool broadcast target '{user_id}'; expected tidepool:domain:<id>"
+            )
+        })?
+        .parse::<u64>()
+        .map_err(|e| format!("Invalid Tidepool domain id in '{user_id}': {e}"))
+}
+
+fn post_response_to_domain(
+    base_url: &str,
+    database: &str,
+    domain_id: u64,
+    domain_title: &str,
+    body: String,
+    reply_to_message_id: Option<u64>,
+) -> Result<(), String> {
+    if body.is_empty() {
+        return Ok(());
+    }
+
+    call_reducer(
+        base_url,
+        database,
+        "post_message",
+        json!([domain_id, body, encode_optional_u64(reply_to_message_id)]),
+    )?;
+
+    channel_host::log(
+        LogLevel::Debug,
+        &format!(
+            "Posted Tidepool reply into domain {} ({})",
+            domain_id, domain_title
+        ),
+    );
+
+    Ok(())
 }
 
 fn clamp_message_body(body: &str, max_chars: usize) -> String {
