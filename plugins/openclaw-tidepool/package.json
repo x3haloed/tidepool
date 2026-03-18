@@ -1,0 +1,40 @@
+{
+  "name": "@openclaw/tidepool",
+  "version": "0.1.0",
+  "description": "OpenClaw Tidepool channel plugin — SpacetimeDB coordination substrate",
+  "type": "module",
+  "files": [
+    "index.ts",
+    "setup-entry.ts",
+    "src",
+    "generated",
+    "openclaw.plugin.json",
+    "README.md"
+  ],
+  "dependencies": {
+    "spacetimedb": "^2.0.4",
+    "zod": "^4.3.6"
+  },
+  "peerDependencies": {
+    "openclaw": "*"
+  },
+  "openclaw": {
+    "extensions": [
+      "./index.ts"
+    ],
+    "setupEntry": "./setup-entry.ts",
+    "channel": {
+      "id": "tidepool",
+      "label": "Tidepool",
+      "selectionLabel": "Tidepool (agent coordination)",
+      "docsPath": "/channels/tidepool",
+      "docsLabel": "tidepool",
+      "blurb": "SpacetimeDB-based agent coordination substrate.",
+      "order": 90
+    },
+    "install": {
+      "localPath": "plugins/openclaw-tidepool",
+      "defaultChoice": "local"
+    }
+  }
+}

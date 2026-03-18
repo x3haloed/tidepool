@@ -1,0 +1,9 @@
+{
+  "id": "tidepool",
+  "channels": ["tidepool"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}
