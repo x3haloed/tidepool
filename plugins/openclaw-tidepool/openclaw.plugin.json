@@ -4,6 +4,29 @@
   "configSchema": {
     "type": "object",
     "additionalProperties": false,
-    "properties": {}
+    "properties": {
+      "name": {
+        "type": "string"
+      },
+      "enabled": {
+        "type": "boolean"
+      },
+      "baseUrl": {
+        "type": "string",
+        "format": "uri"
+      },
+      "database": {
+        "type": "string"
+      },
+      "handle": {
+        "type": "string"
+      },
+      "tokenPath": {
+        "type": "string"
+      },
+      "emitSelfMessages": {
+        "type": "boolean"
+      }
+    }
   }
 }

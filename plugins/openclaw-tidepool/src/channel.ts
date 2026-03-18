@@ -5,6 +5,8 @@ import {
   DEFAULT_ACCOUNT_ID,
   type ChannelPlugin,
 } from "openclaw/plugin-sdk/nostr";
+import fs from "node:fs";
+import path from "node:path";
 import { TidepoolConfigSchema } from "./config-schema.js";
 import {
   resolveTidepoolAccount,
@@ -27,12 +29,14 @@ import type {
 
 // ── Active connections per account ──────────────────────────────────
 interface TidepoolConnection {
+  accountId: string;
   conn: DbConnection;
   subscription: SubscriptionHandle;
+  cursorPath: string;
   cursors: Map<string, number>; // domain_id (string) -> domain_sequence
 }
 
-const activeConnections = new Map<string, TidepoolConnection>();
+let activeConnection: TidepoolConnection | null = null;
 
 // ── Helpers ─────────────────────────────────────────────────────────
 
@@ -43,6 +47,44 @@ function threadKey(domainId: number): string {
 function domainIdFromThread(threadId: string): number | undefined {
   const match = threadId.match(/^tidepool:domain:(\d+)$/);
   return match ? Number(match[1]) : undefined;
+}
+
+function loadPersistedCursors(cursorPath: string): Map<string, number> {
+  try {
+    if (!fs.existsSync(cursorPath)) {
+      return new Map();
+    }
+    const parsed = JSON.parse(fs.readFileSync(cursorPath, "utf-8")) as Record<
+      string,
+      number
+    >;
+    return new Map(
+      Object.entries(parsed).filter(
+        ([, value]) => typeof value === "number" && Number.isFinite(value),
+      ),
+    );
+  } catch {
+    return new Map();
+  }
+}
+
+function persistCursors(cursorPath: string, cursors: Map<string, number>): void {
+  try {
+    fs.mkdirSync(path.dirname(cursorPath), { recursive: true });
+  } catch {}
+  try {
+    fs.writeFileSync(
+      cursorPath,
+      `${JSON.stringify(Object.fromEntries(cursors), null, 2)}\n`,
+      "utf-8",
+    );
+  } catch {
+    // best-effort only
+  }
+}
+
+function getActiveConnection(): TidepoolConnection | null {
+  return activeConnection;
 }
 
 // ── Plugin ──────────────────────────────────────────────────────────
@@ -83,7 +125,7 @@ export const tidepoolPlugin: ChannelPlugin<ResolvedTidepoolAccount> = {
     deliveryMode: "direct",
     textChunkLimit: 1024, // Tidepool message_char_limit is typically 280-1024
     sendText: async ({ to, text, replyToMessageId }) => {
-      const conn = activeConnections.get(DEFAULT_ACCOUNT_ID);
+      const conn = getActiveConnection();
       if (!conn) {
         throw new Error("Tidepool connection not active");
       }
@@ -152,8 +194,13 @@ export const tidepoolPlugin: ChannelPlugin<ResolvedTidepoolAccount> = {
         `[${account.accountId}] connecting to Tidepool at ${account.baseUrl}/${account.database} as ${account.handle}`,
       );
 
-      // Build cursors map from existing channel cursors
-      const cursors = new Map<string, number>();
+      if (activeConnection && activeConnection.accountId !== account.accountId) {
+        throw new Error(
+          `Tidepool already has an active account (${activeConnection.accountId}); only one configured account is supported`,
+        );
+      }
+
+      const cursors = loadPersistedCursors(account.cursorPath);
 
       // Connect to SpacetimeDB
       const conn = await new Promise<DbConnection>((resolve, reject) => {
@@ -174,7 +221,9 @@ export const tidepoolPlugin: ChannelPlugin<ResolvedTidepoolAccount> = {
             ctx.log?.warn(
               `[${account.accountId}] Tidepool disconnected: ${reason?.message ?? "unknown"}`,
             );
-            activeConnections.delete(account.accountId);
+            if (activeConnection?.accountId === account.accountId) {
+              activeConnection = null;
+            }
           })
           .onConnectError((_ctx, error) => {
             clearTimeout(timeout);
@@ -199,6 +248,7 @@ export const tidepoolPlugin: ChannelPlugin<ResolvedTidepoolAccount> = {
               cursors.set(key, msg.domainSequence);
             }
           }
+          persistCursors(account.cursorPath, cursors);
           ctx.log?.debug?.(
             `[${account.accountId}] seeded ${cursors.size} domain cursors`,
           );
@@ -221,6 +271,7 @@ export const tidepoolPlugin: ChannelPlugin<ResolvedTidepoolAccount> = {
           return;
         }
         cursors.set(domainKey, row.domainSequence);
+        persistCursors(account.cursorPath, cursors);
 
         // Skip own messages unless configured otherwise
         const myAccount = Array.from(conn.db.myAccount().iter())[0];
@@ -240,17 +291,13 @@ export const tidepoolPlugin: ChannelPlugin<ResolvedTidepoolAccount> = {
         const domainTitle = subscription?.title ?? `Domain ${row.domainId}`;
         const domainSlug = subscription?.slug ?? "";
         const threadId = threadKey(row.domainId);
+        const createdAtMicros = Number(row.createdAt.microsSinceUnixEpoch);
 
         ctx.log?.info(
           `[${account.accountId}] message from domain ${row.domainId} seq ${row.domainSequence}`,
         );
 
-        // Forward to OpenClaw's message pipeline
-        (
-          runtime.channel.reply as {
-            handleInboundMessage?: (params: unknown) => Promise<void>;
-          }
-        ).handleInboundMessage?.({
+        const inbound = {
           channel: "tidepool",
           accountId: account.accountId,
           senderId: String(row.authorAccountId),
@@ -261,12 +308,15 @@ export const tidepoolPlugin: ChannelPlugin<ResolvedTidepoolAccount> = {
             ? String(row.replyToMessageId)
             : undefined,
           meta: {
-            domainId: row.domainId,
-            domainTitle,
-            domainSlug,
-            messageId: row.messageId,
-            domainSequence: row.domainSequence,
-            authorAccountId: row.authorAccountId,
+            domain_id: row.domainId,
+            domain_title: domainTitle,
+            domain_slug: domainSlug,
+            message_id: row.messageId,
+            domain_sequence: row.domainSequence,
+            author_account_id: row.authorAccountId,
+            reply_to_message_id: row.replyToMessageId ?? null,
+            created_at_micros: createdAtMicros,
+            tidepool_target: threadId,
           },
           reply: async (responseText: string) => {
             conn.reducers.postMessage(
@@ -275,11 +325,61 @@ export const tidepoolPlugin: ChannelPlugin<ResolvedTidepoolAccount> = {
               row.messageId,
             );
           },
+        };
+        const handler = (
+          runtime.channel.reply as {
+            handleInboundMessage?: (params: unknown) => Promise<void>;
+          }
+        ).handleInboundMessage;
+        void handler?.(inbound).catch(async (error) => {
+          const errorText =
+            error instanceof Error ? error.message : String(error);
+          ctx.log?.error?.(
+            `[${account.accountId}] Tidepool inbound handling failed for message ${row.messageId}: ${errorText}`,
+          );
+          try {
+            await handler?.({
+              channel: "tidepool",
+              accountId: account.accountId,
+              senderId: "system:tidepool",
+              chatType: "group",
+              chatId: threadId,
+              text: `System note: handling Tidepool message ${row.messageId} in domain ${row.domainId} failed before the model completed the turn. Error: ${errorText}. Please account for that failure in your ongoing coordination state.`,
+              meta: {
+                domain_id: row.domainId,
+                domain_title: domainTitle,
+                domain_slug: domainSlug,
+                message_id: row.messageId,
+                domain_sequence: row.domainSequence,
+                author_account_id: row.authorAccountId,
+                reply_to_message_id: row.replyToMessageId ?? null,
+                created_at_micros: createdAtMicros,
+                tidepool_target: threadId,
+                tidepool_runtime_error: true,
+                tidepool_runtime_error_message: errorText,
+                tidepool_runtime_error_source_message_id: row.messageId,
+              },
+            });
+          } catch (notifyError) {
+            const notifyText =
+              notifyError instanceof Error
+                ? notifyError.message
+                : String(notifyError);
+            ctx.log?.error?.(
+              `[${account.accountId}] Tidepool runtime error notification also failed for message ${row.messageId}: ${notifyText}`,
+            );
+          }
         });
       });
 
       // Store connection
-      activeConnections.set(account.accountId, { conn, subscription, cursors });
+      activeConnection = {
+        accountId: account.accountId,
+        conn,
+        subscription,
+        cursorPath: account.cursorPath,
+        cursors,
+      };
 
       ctx.log?.info(
         `[${account.accountId}] Tidepool connected and subscribed`,
@@ -288,11 +388,11 @@ export const tidepoolPlugin: ChannelPlugin<ResolvedTidepoolAccount> = {
       // Return cleanup
       return {
         stop: () => {
-          const active = activeConnections.get(account.accountId);
-          if (active) {
+          const active = activeConnection;
+          if (active && active.accountId === account.accountId) {
             active.subscription.unsubscribe();
             active.conn.disconnect();
-            activeConnections.delete(account.accountId);
+            activeConnection = null;
           }
           ctx.log?.info(`[${account.accountId}] Tidepool disconnected`);
         },

@@ -9,8 +9,6 @@ import {
   type TidepoolConfig,
   resolveBaseUrl,
   resolveDatabase,
-  resolveBatchWindow,
-  resolveSeedDomainIds,
 } from "./config-schema.js";
 
 export interface ResolvedTidepoolAccount {
@@ -23,8 +21,7 @@ export interface ResolvedTidepoolAccount {
   handle: string;
   tokenPath: string;
   token: string;
-  seedDomainIds: number[];
-  batchWindowSeconds: number;
+  cursorPath: string;
   emitSelfMessages: boolean;
   config: TidepoolConfig;
 }
@@ -47,10 +44,8 @@ function resolveConfig(
 }
 
 export function listTidepoolAccountIds(cfg: OpenClawConfig): string[] {
-  const tc = resolveConfig(cfg);
-  if (!tc) return [];
-  if (tc.handle || tc.tokenPath) return [DEFAULT_ACCOUNT_ID];
-  return [];
+  const account = resolveTidepoolAccount({ cfg, accountId: DEFAULT_ACCOUNT_ID });
+  return account.configured ? [DEFAULT_ACCOUNT_ID] : [];
 }
 
 export function resolveDefaultTidepoolAccountId(_cfg: OpenClawConfig): string {
@@ -76,6 +71,10 @@ export function resolveTidepoolAccount(opts: {
         "tidepool",
         `${handle}.token`,
       );
+  const cursorPath = path.join(
+    path.dirname(tokenPath),
+    `${handle || "default"}.${resolveDatabase(tc)}.cursors.json`,
+  );
   const token = readToken(tokenPath);
   const configured = Boolean(handle && token);
 
@@ -89,8 +88,7 @@ export function resolveTidepoolAccount(opts: {
     handle,
     tokenPath,
     token,
-    seedDomainIds: resolveSeedDomainIds(tc),
-    batchWindowSeconds: resolveBatchWindow(tc),
+    cursorPath,
     emitSelfMessages: tc?.emitSelfMessages ?? false,
     config: tc ?? {},
   };
