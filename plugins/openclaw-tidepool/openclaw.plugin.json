@@ -12,8 +12,7 @@
         "type": "boolean"
       },
       "baseUrl": {
-        "type": "string",
-        "format": "uri"
+        "type": "string"
       },
       "database": {
         "type": "string"
