@@ -16,6 +16,7 @@ export default __t.row({
   domainId: __t.u64().name("domain_id"),
   domainSequence: __t.u64().name("domain_sequence"),
   authorAccountId: __t.u64().name("author_account_id"),
+  authorHandle: __t.string().name("author_handle"),
   body: __t.string(),
   createdAt: __t.timestamp().name("created_at"),
   replyToMessageId: __t.option(__t.u64()).name("reply_to_message_id"),

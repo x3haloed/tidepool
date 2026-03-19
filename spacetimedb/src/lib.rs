@@ -59,6 +59,7 @@ pub struct SubscribedMessageLookup {
     domain_id: u64,
     domain_sequence: u64,
     author_account_id: u64,
+    author_handle: String,
     body: String,
     created_at: Timestamp,
     reply_to_message_id: Option<u64>,
@@ -273,14 +274,18 @@ pub fn my_subscribed_messages(ctx: &ViewContext) -> Vec<SubscribedMessageLookup>
                 .message()
                 .messages_by_domain_id()
                 .filter(domain_id)
-                .map(|message| SubscribedMessageLookup {
-                    message_id: message.message_id,
-                    domain_id: message.domain_id,
-                    domain_sequence: message.domain_sequence,
-                    author_account_id: message.author_account_id,
-                    body: message.body,
-                    created_at: message.created_at,
-                    reply_to_message_id: message.reply_to_message_id,
+                .filter_map(|message| {
+                    let author = ctx.db.account().account_id().find(message.author_account_id)?;
+                    Some(SubscribedMessageLookup {
+                        message_id: message.message_id,
+                        domain_id: message.domain_id,
+                        domain_sequence: message.domain_sequence,
+                        author_account_id: message.author_account_id,
+                        author_handle: author.handle,
+                        body: message.body,
+                        created_at: message.created_at,
+                        reply_to_message_id: message.reply_to_message_id,
+                    })
                 }),
         );
     }

@@ -17,4 +17,5 @@ export default __t.row({
   title: __t.string(),
   messageCharLimit: __t.u16().name("message_char_limit"),
   batchWindowSeconds: __t.u32().name("batch_window_seconds"),
+  autoSubscribed: __t.bool().name("auto_subscribed"),
 });

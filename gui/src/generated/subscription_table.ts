@@ -16,6 +16,7 @@ export default __t.row({
   subscriberAccountId: __t.u64().name("subscriber_account_id"),
   domainId: __t.u64().name("domain_id"),
   batchWindowSeconds: __t.u32().name("batch_window_seconds"),
+  autoSubscribed: __t.bool().name("auto_subscribed"),
   active: __t.bool(),
   createdAt: __t.timestamp().name("created_at"),
   updatedAt: __t.timestamp().name("updated_at"),
