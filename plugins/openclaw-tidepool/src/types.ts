@@ -35,6 +35,19 @@ function readToken(tokenPath: string): string {
   }
 }
 
+function expandUserPath(input: string): string {
+  if (!input) {
+    return input;
+  }
+  if (input === "~") {
+    return process.env.HOME ?? "/root";
+  }
+  if (input.startsWith("~/")) {
+    return path.join(process.env.HOME ?? "/root", input.slice(2));
+  }
+  return input;
+}
+
 function resolveConfig(
   cfg: OpenClawConfig,
 ): TidepoolConfig | undefined {
@@ -45,7 +58,7 @@ function resolveConfig(
 
 export function listTidepoolAccountIds(cfg: OpenClawConfig): string[] {
   const account = resolveTidepoolAccount({ cfg, accountId: DEFAULT_ACCOUNT_ID });
-  return account.configured ? [DEFAULT_ACCOUNT_ID] : [];
+  return account.handle ? [DEFAULT_ACCOUNT_ID] : [];
 }
 
 export function resolveDefaultTidepoolAccountId(_cfg: OpenClawConfig): string {
@@ -64,7 +77,7 @@ export function resolveTidepoolAccount(opts: {
   const handle = tc?.handle ?? "";
   const rawTokenPath = tc?.tokenPath ?? "";
   const tokenPath = rawTokenPath
-    ? path.resolve(rawTokenPath)
+    ? path.resolve(expandUserPath(rawTokenPath))
     : path.join(
         process.env.HOME ?? "/root",
         ".betterclaw",
