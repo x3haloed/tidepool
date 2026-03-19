@@ -50,6 +50,7 @@ pub struct SubscriptionLookup {
     title: String,
     message_char_limit: u16,
     batch_window_seconds: u32,
+    auto_subscribed: bool,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, spacetimedb::SpacetimeType)]
@@ -161,6 +162,7 @@ pub struct Subscription {
     subscriber_account_id: u64,
     domain_id: u64,
     batch_window_seconds: u32,
+    auto_subscribed: bool,
     active: bool,
     created_at: Timestamp,
     updated_at: Timestamp,
@@ -252,6 +254,7 @@ pub fn my_subscriptions(ctx: &ViewContext) -> Vec<SubscriptionLookup> {
                 title: domain.title,
                 message_char_limit: domain.message_char_limit,
                 batch_window_seconds: subscription.batch_window_seconds,
+                auto_subscribed: subscription.auto_subscribed,
             })
         })
         .collect()
@@ -405,6 +408,16 @@ pub fn create_dm(
             continue;
         }
         insert_domain_member(ctx, domain.domain_id, account_id, DomainRole::Member)?;
+    }
+
+    for account_id in dm_member_account_ids(ctx, domain.domain_id) {
+        ensure_subscription(
+            ctx,
+            account_id,
+            domain.domain_id,
+            DEFAULT_BATCH_WINDOW_SECONDS,
+            true,
+        );
     }
 
     Ok(())
@@ -566,23 +579,13 @@ pub fn subscribe_domain(
         return Err("You are not allowed to subscribe to that domain.".to_string());
     }
 
-    if let Some(mut subscription) = find_subscription(ctx, sender_account.account_id, domain_id) {
-        subscription.batch_window_seconds = batch_window_seconds;
-        subscription.active = true;
-        subscription.updated_at = ctx.timestamp;
-        ctx.db.subscription().subscription_id().update(subscription);
-        return Ok(());
-    }
-
-    ctx.db.subscription().insert(Subscription {
-        subscription_id: 0,
-        subscriber_account_id: sender_account.account_id,
+    ensure_subscription(
+        ctx,
+        sender_account.account_id,
         domain_id,
         batch_window_seconds,
-        active: true,
-        created_at: ctx.timestamp,
-        updated_at: ctx.timestamp,
-    });
+        false,
+    );
 
     Ok(())
 }
@@ -785,6 +788,34 @@ fn find_subscription(
         subscription.subscriber_account_id == subscriber_account_id
             && subscription.domain_id == domain_id
     })
+}
+
+fn ensure_subscription(
+    ctx: &ReducerContext,
+    subscriber_account_id: u64,
+    domain_id: u64,
+    batch_window_seconds: u32,
+    auto_subscribed: bool,
+) {
+    if let Some(mut subscription) = find_subscription(ctx, subscriber_account_id, domain_id) {
+        subscription.batch_window_seconds = batch_window_seconds;
+        subscription.auto_subscribed = auto_subscribed;
+        subscription.active = true;
+        subscription.updated_at = ctx.timestamp;
+        ctx.db.subscription().subscription_id().update(subscription);
+        return;
+    }
+
+    ctx.db.subscription().insert(Subscription {
+        subscription_id: 0,
+        subscriber_account_id,
+        domain_id,
+        batch_window_seconds,
+        auto_subscribed,
+        active: true,
+        created_at: ctx.timestamp,
+        updated_at: ctx.timestamp,
+    });
 }
 
 fn next_domain_sequence(ctx: &ReducerContext, domain_id: u64) -> u64 {
